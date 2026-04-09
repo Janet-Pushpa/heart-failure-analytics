@@ -39,42 +39,31 @@ st.title("Deep-Pulse: Predictive Health Analytics")
 tab1, tab2, tab3 = st.tabs(["📊 Overview", "🩺 Diagnostics", "📈 Trend Forecasting"])
 
 
-# --- Data Loading and Preprocessing (Simulated 'Heart Failure Clinical Records' Dataset) ---
+# --- REFINED DATA PIPELINE ---
+
 @st.cache_data
 def load_and_preprocess_data():
-    # Simulate 'Heart Failure Clinical Records' Dataset
-    np.random.seed(42)
-    data_size = 1000
-    df = pd.DataFrame({
-        'age': np.random.randint(40, 95, data_size),
-        'anaemia': np.random.choice([0, 1], data_size, p=[0.6, 0.4]),
-        'creatinine_phosphokinase': np.random.randint(20, 800, data_size),
-        'diabetes': np.random.choice([0, 1], data_size, p=[0.6, 0.4]),
-        'ejection_fraction': np.random.randint(20, 80, data_size),
-        'high_blood_pressure': np.random.choice([0, 1], data_size, p=[0.7, 0.3]),
-        'platelets': np.random.randint(150000, 500000, data_size),
-        'serum_creatinine': np.round(np.random.uniform(0.5, 9.0, data_size), 2), # New feature
-        'serum_sodium': np.random.randint(110, 150, data_size),
-        'sex': np.random.choice([0, 1], data_size, p=[0.5, 0.5]), # 0=Female, 1=Male
-        'smoking': np.random.choice([0, 1], data_size, p=[0.7, 0.3]),
-        'time': np.random.randint(4, 300, data_size),
-        'DEATH_EVENT': np.random.choice([0, 1], data_size, p=[0.7, 0.3]) # Target variable
-    })
+    try:
+        df = pd.read_csv('heart_failure_clinical_records_dataset.csv')
+    except:
+        st.error("Dataset not found. Please ensure the CSV is in the project folder.")
+        return None, None
 
-    # Introduce some missing values and handle them (Module 2)
-    for col in ['creatinine_phosphokinase', 'platelets', 'serum_creatinine']:
-        df.loc[df.sample(frac=0.03).index, col] = np.nan
-    df.fillna(df.mean(numeric_only=True), inplace=True)
-
-    # Feature Engineering (Example: Ratio of Creatinine to Age)
+    # A. Cleaning (Module 2)
+    # We drop any duplicate rows that might skew the training
+    df.drop_duplicates(inplace=True)
+    
+    # B. Feature Engineering (Domain Specific)
+    # Clinical studies show the ratio of Serum Creatinine to Sodium is a strong indicator of kidney stress in heart patients.
+    df['creatinine_sodium_ratio'] = df['serum_creatinine'] / df['serum_sodium']
     df['creatinine_age_ratio'] = df['serum_creatinine'] / df['age']
 
-    # Scaling numerical features (Module 2)
-    numerical_cols = [
-        'age', 'creatinine_phosphokinase', 'ejection_fraction', 
-        'platelets', 'serum_creatinine', 'serum_sodium', 'time', 
-        'creatinine_age_ratio'
-    ]
+    # C. Feature Selection
+    # We define numerical vs categorical for scaling logic
+    numerical_cols = ['age', 'creatinine_phosphokinase', 'ejection_fraction', 
+                      'platelets', 'serum_creatinine', 'serum_sodium', 'time',
+                      'creatinine_sodium_ratio', 'creatinine_age_ratio']
+    
     scaler = StandardScaler()
     df[numerical_cols] = scaler.fit_transform(df[numerical_cols])
 
@@ -82,24 +71,30 @@ def load_and_preprocess_data():
 
 df, scaler = load_and_preprocess_data()
 
-# Prepare data for Classification (Predicting 'DEATH_EVENT', Module 6)
-X = df.drop('DEATH_EVENT', axis=1)
-y = df['DEATH_EVENT']
+# --- MODEL TRAINING (The "Brain" Construction) ---
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+def train_risk_model(df):
+    X = df.drop('DEATH_EVENT', axis=1)
+    y = df['DEATH_EVENT']
 
-# SMOTE for class imbalance (Module 6)
-# SMOTE (Synthetic Minority Over-sampling Technique) works by creating synthetic samples of the minority class.
-# It selects k-nearest neighbors for each minority sample, then randomly picks one neighbor
-# and creates a new synthetic sample somewhere along the line segment connecting the original sample and the chosen neighbor.
-# This helps to balance the class distribution without simply duplicating existing samples.
-smote = SMOTE(random_state=42)
-X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
+    # 1. Stratified Split (Ensures equal ratio of Death/Life in both sets)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-# Train Random Forest Classifier (Module 6)
-rf_classifier = RandomForestClassifier(random_state=42)
-rf_classifier.fit(X_train_smote, y_train_smote)
+    # 2. SMOTE (Module 6: Rebalancing)
+    # We only fit SMOTE on training data to prevent "Data Leakage"
+    smote = SMOTE(random_state=42)
+    X_train_bal, y_train_bal = smote.fit_resample(X_train, y_train)
 
+    # 3. Model: Random Forest (Module 5: Classification)
+    # n_estimators=100 creates an ensemble of 100 decision trees for voting.
+    rf = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+    rf.fit(X_train_bal, y_train_bal)
+    
+    return rf, X.columns, X_train_bal
+
+rf_classifier, model_features, X_train_bal = train_risk_model(df)
 # Train Linear Regression for 'Serum Creatinine' prediction (Module 4)
 # Using other numerical features to predict SerumCreatinine
 X_serum_creatinine = df[[
@@ -147,122 +142,121 @@ with tab1:
 
 
 # --- Tab 2: Diagnostics (Classification) ---
+# --- Tab 2: Diagnostics (Classification) ---
 with tab2:
     st.header("🩺 Diagnostics: Heart Failure Risk")
 
     st.sidebar.header("Patient Input Features")
 
-    age_input = st.sidebar.slider("Age", min_value=40, max_value=95, value=60)
-    cpk_input = st.sidebar.slider("Creatinine Phosphokinase", min_value=20, max_value=800, value=200)
-    ef_input = st.sidebar.slider("Ejection Fraction", min_value=20, max_value=80, value=35)
-    platelets_input = st.sidebar.slider("Platelets (kiloplatelets/mL)", min_value=150000, max_value=500000, value=250000)
-    sc_input = st.sidebar.slider("Serum Creatinine (mg/dL)", min_value=0.5, max_value=9.0, value=1.5, step=0.1)
-    ss_input = st.sidebar.slider("Serum Sodium (mEq/L)", min_value=110, max_value=150, value=135)
-    time_input = st.sidebar.slider("Follow-up Period (days)", min_value=4, max_value=300, value=150)
+    # 1. Collect inputs
+    age_input = st.sidebar.slider("Age", 40, 95, 60)
+    cpk_input = st.sidebar.slider("Creatinine Phosphokinase", 20, 800, 200)
+    ef_input = st.sidebar.slider("Ejection Fraction", 20, 80, 35)
+    platelets_input = st.sidebar.slider("Platelets", 150000, 500000, 250000)
+    sc_input = st.sidebar.slider("Serum Creatinine", 0.5, 9.0, 1.5)
+    ss_input = st.sidebar.slider("Serum Sodium", 110, 150, 135)
+    time_input = st.sidebar.slider("Follow-up Period", 4, 300, 150)
 
-    anaemia_input = st.sidebar.checkbox("Anaemia")
-    diabetes_input = st.sidebar.checkbox("Diabetes")
-    hbp_input = st.sidebar.checkbox("High Blood Pressure")
-    sex_input = st.sidebar.radio("Sex", ["Male", "Female"])
-    smoking_input = st.sidebar.checkbox("Smoking")
+    anaemia_input = 1 if st.sidebar.checkbox("Anaemia") else 0
+    diabetes_input = 1 if st.sidebar.checkbox("Diabetes") else 0
+    hbp_input = 1 if st.sidebar.checkbox("High Blood Pressure") else 0
+    sex_input = 1 if st.sidebar.radio("Sex", ["Male", "Female"]) == "Male" else 0
+    smoking_input = 1 if st.sidebar.checkbox("Smoking") else 0
 
-    # Create a DataFrame for the current input
-    input_df = pd.DataFrame({
-        'age': [age_input],
-        'anaemia': [1 if anaemia_input else 0],
-        'creatinine_phosphokinase': [cpk_input],
-        'diabetes': [1 if diabetes_input else 0],
-        'ejection_fraction': [ef_input],
-        'high_blood_pressure': [1 if hbp_input else 0],
-        'platelets': [platelets_input],
-        'serum_creatinine': [sc_input],
-        'serum_sodium': [ss_input],
-        'sex': [1 if sex_input == 'Male' else 0],
-        'smoking': [1 if smoking_input else 0],
-        'time': [time_input],
-    })
+    # 2. Create the DataFrame with ALL features used during training
+    input_dict = {
+        'age': age_input,
+        'anaemia': anaemia_input,
+        'creatinine_phosphokinase': cpk_input,
+        'diabetes': diabetes_input,
+        'ejection_fraction': ef_input,
+        'high_blood_pressure': hbp_input,
+        'platelets': platelets_input,
+        'serum_creatinine': sc_input,
+        'serum_sodium': ss_input,
+        'sex': sex_input,
+        'smoking': smoking_input,
+        'time': time_input
+    }
+    
+    input_df = pd.DataFrame([input_dict])
 
-    # Feature Engineering for input_df
+    # 3. Add the engineered features (MUST match the training steps)
+    input_df['creatinine_sodium_ratio'] = input_df['serum_creatinine'] / input_df['serum_sodium']
     input_df['creatinine_age_ratio'] = input_df['serum_creatinine'] / input_df['age']
 
-    # Ensure all columns are present and in the correct order for prediction
-    input_df = input_df[X.columns] 
+    # 4. CRITICAL FIX: Reorder columns to match the model's training features exactly
+    input_df = input_df[model_features] 
 
-    # Scale the numerical input features
-    numerical_cols_for_scaling = [
+    # 5. Scale only the numerical columns in the EXACT order they were fit
+    cols_to_scale = [
         'age', 'creatinine_phosphokinase', 'ejection_fraction', 
-        'platelets', 'serum_creatinine', 'serum_sodium', 'time', 
-        'creatinine_age_ratio'
+        'platelets', 'serum_creatinine', 'serum_sodium', 'time',
+        'creatinine_sodium_ratio', 'creatinine_age_ratio'
     ]
-    input_df[numerical_cols_for_scaling] = scaler.transform(input_df[numerical_cols_for_scaling])
+    
+    # Apply transformation
+    input_df[cols_to_scale] = scaler.transform(input_df[cols_to_scale])
 
+    # 6. Prediction Button
     if st.sidebar.button("Predict Death Event Risk"):
         prediction_proba = rf_classifier.predict_proba(input_df)[:, 1][0]
         
-        # Determine color based on risk levels
-        card_color = "#00FF00" # Green
-        if prediction_proba * 100 > 70:
-            card_color = "#FF0000" # Red
-        elif prediction_proba * 100 > 40:
-            card_color = "#FFA500" # Orange
-        elif prediction_proba * 100 > 20:
-            card_color = "#FFFF00" # Yellow
+        # UI Feedback
+        color = "#00FF00" if prediction_proba < 0.3 else "#FFA500" if prediction_proba < 0.7 else "#FF0000"
+        st.metric(label="Risk Probability", value=f"{prediction_proba * 100:.2f}%")
+        
+        style_metric_cards(background_color="#1f2630", border_left_color=color)
 
-        # Display the Metric Card
-        st.metric(
-            label="Predicted Probability of Death Event", 
-            value=f"{prediction_proba * 100:.2f}%", 
-            help="Probability based on Random Forest Classifier trained with SMOTE."
-        )
-
-        # This is what makes the card glow and use your 'card_color'
-        style_metric_cards(
-            background_color="#1f2630",
-            border_left_color=card_color,
-            border_size_px=5,
-            box_shadow=True
-        )
-
-        # Gauge Chart
+        # Gauge Chart (Note: use width='stretch' to fix warning)
         fig_gauge = go.Figure(go.Indicator(
             mode = "gauge+number",
             value = prediction_proba * 100,
-            domain = {'x': [0, 1], 'y': [0, 1]},
-            title = {"text": "Risk Assessment Gauge"},
-            gauge = {
-                "axis": {"range": [None, 100]},
-                "bar": {"color": "black"},
-                "steps": [
-                    {"range": [0, 20], "color": "green"},
-                    {"range": [20, 40], "color": "yellow"},
-                    {"range": [40, 70], "color": "orange"},
-                    {"range": [70, 100], "color": "red"}]}))
-        
-        st.plotly_chart(fig_gauge, use_container_width=True)
+            title = {"text": "Risk Assessment"},
+            gauge = {'axis': {'range': [0, 100]},
+                     'steps': [
+                         {'range': [0, 30], 'color': "green"},
+                         {'range': [30, 70], 'color': "orange"},
+                         {'range': [70, 100], 'color': "red"}]}
+        ))
+        st.plotly_chart(fig_gauge, width='stretch')
 
-        st.subheader("SHAP Waterfall Plot for Explainable AI (Death Event)")
-        # For SHAP, we need a single prediction explanation
-        st.subheader("SHAP Waterfall Plot for Explainable AI (Death Event)")
+# --- FIXED SHAP LOGIC ---
+        st.subheader("SHAP Waterfall Plot: Why this prediction?")
         
-        # Use the newer SHAP Explainer interface which handles the indexing for us
-        explainer = shap.Explainer(rf_classifier, X_train_smote)
-        shap_values = explainer(input_df)
+        # 1. Create the explainer
+        explainer = shap.TreeExplainer(rf_classifier)
+        shap_values = explainer.shap_values(input_df)
 
-        # We take the values for the 'Death Event' (index 1)
-        # Random Forest in SHAP often returns [samples, features, classes]
-        # We need to ensure we are passing a single 1D Explanation object
+        # 2. Handle dimensionality (The fix for your IndexError)
+        # Some versions return [samples, features, classes], others just [samples, features]
+        if isinstance(shap_values, list):
+            # If it's a list (older SHAP), take the values for the 'Death Event' (index 1)
+            sv = shap_values[1][0]
+            bv = explainer.expected_value[1]
+        elif len(shap_values.shape) == 3:
+            # If it's a 3D array, take [sample 0, all features, class 1]
+            sv = shap_values[0, :, 1]
+            bv = explainer.expected_value[1]
+        else:
+            # If it's already 2D, just take the first sample
+            sv = shap_values[0]
+            bv = explainer.expected_value
+
+        # 3. Create the Explanation object for the waterfall plot
         exp = shap.Explanation(
-            values=shap_values.values[0, :, 1], 
-            base_values=shap_values.base_values[0, 1], 
+            values=sv, 
+            base_values=bv, 
             data=input_df.iloc[0].values, 
-            feature_names=X.columns.tolist()
+            feature_names=list(model_features)
         )
 
-        fig, ax = plt.subplots(figsize=(10, 6))
+        # 4. Plotting
+        fig_shap, ax = plt.subplots(figsize=(10, 6))
         shap.plots.waterfall(exp, show=False)
-        st.pyplot(fig)
-        plt.clf() # Clean up the figure after plotting
-
+        plt.tight_layout()
+        st.pyplot(fig_shap)
+        plt.clf()
 
 # --- Tab 3: Trend Forecasting (Time Series) ---
 with tab3:
